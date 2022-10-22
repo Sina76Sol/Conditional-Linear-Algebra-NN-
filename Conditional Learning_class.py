@@ -50,31 +50,13 @@ def low_rank_approx(weights, rank):
 
 
 # define apply_approximation function
-def apply_low_rank(model_weights, rank=5):
+def apply_low_rank(model_weights, rank=1):
     for w in model_weights:
         if w.shape.rank < 2:
             pass
         else:
             approx = low_rank_approx(w.numpy(), rank)
             w.assign(tf.Variable(approx))
-
-
-# Speed up the code
-@tf.function
-def train_step(x, y):
-    with tf.GradientTape() as tape:
-        logits = model(x, training=True)
-        loss_value = loss_fn(y, logits)
-    grads = tape.gradient(loss_value, model.trainable_weights)
-    optimizer.apply_gradients(zip(grads, model.trainable_weights))
-    train_acc_metric.update_state(y, logits)
-    return loss_value
-
-
-@tf.function
-def test_step(x, y):
-    val_logits = model(x, training=False)
-    val_acc_metric.update_state(y, val_logits)
 
 
 epochs = 5
@@ -84,7 +66,14 @@ for epoch in range(epochs):
 
     # Iterate over the batches of the dataset.
     for step, (x_batch_train, y_batch_train) in enumerate(train_dataset):
-        loss_value = train_step(x_batch_train, y_batch_train)
+        with tf.GradientTape() as tape:
+            logits = model(x_batch_train, training=True)
+            loss_value = loss_fn(y_batch_train, logits)
+        grads = tape.gradient(loss_value, model.trainable_weights)
+        optimizer.apply_gradients(zip(grads, model.trainable_weights))
+        apply_low_rank(model.trainable_weights)
+        # Update training metric.
+        train_acc_metric.update_state(y_batch_train, logits)
 
         # Log every 200 batches.
         if step % 200 == 0:
@@ -103,8 +92,9 @@ for epoch in range(epochs):
 
     # Run a validation loop at the end of each epoch.
     for x_batch_val, y_batch_val in val_dataset:
-        test_step(x_batch_val, y_batch_val)
-
+        val_logits = model(x_batch_val, training=False)
+        # Update val metrics
+        val_acc_metric.update_state(y_batch_val, val_logits)
     val_acc = val_acc_metric.result()
     val_acc_metric.reset_states()
     print("Validation acc: %.4f" % (float(val_acc),))
