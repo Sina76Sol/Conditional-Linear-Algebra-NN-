@@ -7,6 +7,7 @@ import time
 # Get model
 inputs = keras.Input(shape=(784,), name="digits")
 x = layers.Dense(128, activation="relu", name="dense_1")(inputs)
+x = layers.Dropout(0.2)(x)
 outputs = layers.Dense(10, name="predictions")(x)
 model = keras.Model(inputs=inputs, outputs=outputs)
 
@@ -41,7 +42,7 @@ val_dataset = val_dataset.batch(batch_size)
 
 
 # define low rank approximation function
-def low_rank_approx(weights, rank=5):
+def low_rank_approx(weights, rank):
     u, s, vt = np.linalg.svd(weights, full_matrices=False)
     s = np.diag(s)
     approximation = u[:, :rank] @ s[0:rank, :rank] @ vt[:rank, :]
@@ -49,13 +50,31 @@ def low_rank_approx(weights, rank=5):
 
 
 # define apply_approximation function
-def apply_low_rank(model_weights):
+def apply_low_rank(model_weights, rank=5):
     for w in model_weights:
         if w.shape.rank < 2:
             pass
         else:
-            approx = low_rank_approx(w.numpy())
+            approx = low_rank_approx(w.numpy(), rank)
             w.assign(tf.Variable(approx))
+
+
+# Speed up the code
+@tf.function
+def train_step(x, y):
+    with tf.GradientTape() as tape:
+        logits = model(x, training=True)
+        loss_value = loss_fn(y, logits)
+    grads = tape.gradient(loss_value, model.trainable_weights)
+    optimizer.apply_gradients(zip(grads, model.trainable_weights))
+    train_acc_metric.update_state(y, logits)
+    return loss_value
+
+
+@tf.function
+def test_step(x, y):
+    val_logits = model(x, training=False)
+    val_acc_metric.update_state(y, val_logits)
 
 
 epochs = 5
@@ -65,14 +84,7 @@ for epoch in range(epochs):
 
     # Iterate over the batches of the dataset.
     for step, (x_batch_train, y_batch_train) in enumerate(train_dataset):
-        with tf.GradientTape() as tape:
-            logits = model(x_batch_train, training=True)
-            loss_value = loss_fn(y_batch_train, logits)
-        grads = tape.gradient(loss_value, model.trainable_weights)
-        optimizer.apply_gradients(zip(grads, model.trainable_weights))
-        apply_low_rank(model.trainable_weights)
-        # Update training metric.
-        train_acc_metric.update_state(y_batch_train, logits)
+        loss_value = train_step(x_batch_train, y_batch_train)
 
         # Log every 200 batches.
         if step % 200 == 0:
@@ -91,12 +103,16 @@ for epoch in range(epochs):
 
     # Run a validation loop at the end of each epoch.
     for x_batch_val, y_batch_val in val_dataset:
-        val_logits = model(x_batch_val, training=False)
-        # Update val metrics
-        val_acc_metric.update_state(y_batch_val, val_logits)
+        test_step(x_batch_val, y_batch_val)
+
     val_acc = val_acc_metric.result()
     val_acc_metric.reset_states()
     print("Validation acc: %.4f" % (float(val_acc),))
     print("Time taken: %.2fs" % (time.time() - start_time))
 
+# Compile the model for testing
+model.compile(optimizer=optimizer,
+              loss=loss_fn,
+              metrics=train_acc_metric)
 
+model.evaluate(x_test, y_test, verbose=2)
